@@ -6,19 +6,6 @@
  *  See LICENSE.md for more information.
  */
 
-/*
- *  Wed May 24 10:49:37 CDT 2000
- *  Fixes to threading/context creation for the nVidia X4 drivers by
- *  Christian Zander <phoenix@minion.de>
- */
-
-/*
- *  Ported to XBMC by d4rk
- *  Also added 'm_hSpeed' to animate transition between bar heights
- *
- *  Ported to GLES 2.0 by Gimli
- */
-
 #define __STDC_LIMIT_MACROS
 
 #include <kodi/addon-instance/Visualization.h>
@@ -37,7 +24,7 @@
 #define M_PI 3.141592654f
 #endif
 
-#define NUM_BANDS 16
+#define NUM_BANDS 64
 
 class ATTR_DLL_LOCAL CVisualizationSpectrum
   : public kodi::addon::CAddonBase,
@@ -60,24 +47,18 @@ public:
 private:
   void SetBarHeightSetting(int settingValue);
   void SetSpeedSetting(int settingValue);
-  void SetModeSetting(int settingValue);
 
-  GLfloat m_heights[16][16];
-  GLfloat m_cHeights[16][16];
+  GLfloat m_heights[NUM_BANDS];
+  GLfloat m_cHeights[NUM_BANDS];
   GLfloat m_scale;
-  GLenum m_mode;
-  float m_y_angle, m_y_speed, m_y_fixedAngle;
-  float m_x_angle, m_x_speed;
-  float m_z_angle, m_z_speed;
   float m_hSpeed;
 
-  void draw_bar(GLfloat x_offset, GLfloat z_offset, GLfloat height, GLfloat red, GLfloat green, GLfloat blue);
-  void draw_bars(void);
+  void hsl_to_rgb(float h, float s, float l, float& r, float& g, float& b);
+  void get_rainbow_color(float position, float& r, float& g, float& b);
+  void draw_spectrum_bars(void);
 
-  // Shader related data
   glm::mat4 m_projMat;
   glm::mat4 m_modelMat;
-  GLfloat m_pointSize = 0.0f;
   std::vector<glm::vec3> m_vertex_buffer_data;
   std::vector<glm::vec3> m_color_buffer_data;
 
@@ -95,24 +76,15 @@ private:
 };
 
 CVisualizationSpectrum::CVisualizationSpectrum()
-  : m_mode(GL_TRIANGLES),
-    m_y_angle(45.0f),
-    m_y_speed(0.5f),
-    m_x_angle(20.0f),
-    m_x_speed(0.0f),
-    m_z_angle(0.0f),
-    m_z_speed(0.0f),
-    m_hSpeed(0.05f)
+  : m_hSpeed(0.05f)
 {
   m_scale = 1.0 / log(256.0);
 
   SetBarHeightSetting(kodi::addon::GetSettingInt("bar_height"));
   SetSpeedSetting(kodi::addon::GetSettingInt("speed"));
-  SetModeSetting(kodi::addon::GetSettingInt("mode"));
-  m_y_fixedAngle = kodi::addon::GetSettingInt("rotation_angle");
 
-  m_vertex_buffer_data.resize(48);
-  m_color_buffer_data.resize(48);
+  memset(m_heights, 0, sizeof(m_heights));
+  memset(m_cHeights, 0, sizeof(m_cHeights));
 }
 
 bool CVisualizationSpectrum::Start(int channels, int samplesPerSec, int bitsPerSample, const std::string& songName)
@@ -130,25 +102,13 @@ bool CVisualizationSpectrum::Start(int channels, int samplesPerSec, int bitsPerS
     return false;
   }
 
-  int x, y;
-
-  for(x = 0; x < 16; x++)
+  for(int i = 0; i < NUM_BANDS; i++)
   {
-    for(y = 0; y < 16; y++)
-    {
-      m_heights[y][x] = 0.0f;
-      m_cHeights[y][x] = 0.0f;
-    }
+    m_heights[i] = 0.0f;
+    m_cHeights[i] = 0.0f;
   }
 
-  m_x_speed = 0.0f;
-  m_y_speed = 0.5f;
-  m_z_speed = 0.0f;
-  m_x_angle = 20.0f;
-  m_y_angle = 45.0f;
-  m_z_angle = 0.0f;
-
-  m_projMat = glm::frustum(-1.0f, 1.0f, -1.0f, 1.0f, 1.5f, 10.0f);
+  m_projMat = glm::ortho(-1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f);
 
 #ifdef HAS_GL
   glGenBuffers(2, m_vertexVBO);
@@ -173,9 +133,6 @@ void CVisualizationSpectrum::Stop()
 #endif
 }
 
-//-- Render -------------------------------------------------------------------
-// Called once per frame. Do all rendering here.
-//-----------------------------------------------------------------------------
 void CVisualizationSpectrum::Render()
 {
   if (!m_startOK)
@@ -190,52 +147,25 @@ void CVisualizationSpectrum::Render()
   glVertexAttribPointer(m_hCol, 3, GL_FLOAT, GL_FALSE, sizeof(GLfloat)*3, nullptr);
   glEnableVertexAttribArray(m_hCol);
 #else
-  // 1rst attribute buffer : vertices
   glEnableVertexAttribArray(m_hPos);
   glVertexAttribPointer(m_hPos, 3, GL_FLOAT, GL_FALSE, 0, &m_vertex_buffer_data[0]);
 
-  // 2nd attribute buffer : colors
   glEnableVertexAttribArray(m_hCol);
   glVertexAttribPointer(m_hCol, 3, GL_FLOAT, GL_FALSE, 0, &m_color_buffer_data[0]);
 #endif
 
   glDisable(GL_BLEND);
-#ifdef HAS_GL
-  glEnable(GL_PROGRAM_POINT_SIZE);
-#endif
   glEnable(GL_DEPTH_TEST);
   glDepthFunc(GL_LESS);
 
-  // Clear the screen
-  glClear(GL_DEPTH_BUFFER_BIT);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-  m_x_angle += m_x_speed;
-  if(m_x_angle >= 360.0f)
-    m_x_angle -= 360.0f;
-
-  if (m_y_fixedAngle < 0.0f)
-  {
-    m_y_angle += m_y_speed;
-    if(m_y_angle >= 360.0f)
-      m_y_angle -= 360.0f;
-  }
-  else
-  {
-    m_y_angle = m_y_fixedAngle;
-  }
-
-  m_z_angle += m_z_speed;
-  if(m_z_angle >= 360.0f)
-    m_z_angle -= 360.0f;
-
-  m_modelMat = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -0.5f, -5.0f));
-  m_modelMat = glm::rotate(m_modelMat, glm::radians(m_x_angle), glm::vec3(1.0f, 0.0f, 0.0f));
-  m_modelMat = glm::rotate(m_modelMat, glm::radians(m_y_angle), glm::vec3(0.0f, 1.0f, 0.0f));
-  m_modelMat = glm::rotate(m_modelMat, glm::radians(m_z_angle), glm::vec3(0.0f, 0.0f, 1.0f));
+  m_modelMat = glm::mat4(1.0f);
 
   EnableShader();
 
-  draw_bars();
+  draw_spectrum_bars();
 
   DisableShader();
 
@@ -243,15 +173,11 @@ void CVisualizationSpectrum::Render()
   glDisableVertexAttribArray(m_hCol);
 
   glDisable(GL_DEPTH_TEST);
-#ifdef HAS_GL
-  glDisable(GL_PROGRAM_POINT_SIZE);
-#endif
   glEnable(GL_BLEND);
 }
 
 void CVisualizationSpectrum::OnCompiledAndLinked()
 {
-  // Variables passed directly to the Vertex shader
   m_uProjMatrix = glGetUniformLocation(ProgramHandle(), "u_projectionMatrix");
   m_uModelMatrix = glGetUniformLocation(ProgramHandle(), "u_modelViewMatrix");
   m_uPointSize = glGetUniformLocation(ProgramHandle(), "u_pointSize");
@@ -261,225 +187,169 @@ void CVisualizationSpectrum::OnCompiledAndLinked()
 
 bool CVisualizationSpectrum::OnEnabled()
 {
-  // This is called after glUseProgram()
   glUniformMatrix4fv(m_uProjMatrix, 1, GL_FALSE, glm::value_ptr(m_projMat));
   glUniformMatrix4fv(m_uModelMatrix, 1, GL_FALSE, glm::value_ptr(m_modelMat));
-  glUniform1f(m_uPointSize, m_pointSize);
 
   return true;
 }
 
-void CVisualizationSpectrum::draw_bar(GLfloat x_offset, GLfloat z_offset, GLfloat height, GLfloat red, GLfloat green, GLfloat blue )
+void CVisualizationSpectrum::hsl_to_rgb(float h, float s, float l, float& r, float& g, float& b)
 {
-  GLfloat width = 0.1f;
-  m_vertex_buffer_data =
-  {
-    // Bottom
-    { x_offset + width, 0.0f,   z_offset + width },
-    { x_offset,         0.0f,   z_offset },
-    { x_offset + width, 0.0f,   z_offset },
-    { x_offset + width, 0.0f,   z_offset + width },
-    { x_offset,         0.0f,   z_offset + width },
-    { x_offset,         0.0f,   z_offset },
+  float c = (1.0f - ::fabs(2.0f * l - 1.0f)) * s;
+  float x = c * (1.0f - ::fabs(fmod(h / 60.0f, 2.0f) - 1.0f));
+  float m = l - c / 2.0f;
 
-    { x_offset,         0.0f,   z_offset + width },
-    { x_offset + width, 0.0f,   z_offset },
-    { x_offset + width, 0.0f,   z_offset + width },
-    { x_offset,         0.0f,   z_offset + width },
-    { x_offset + width, 0.0f,   z_offset },
-    { x_offset,         0.0f,   z_offset },
+  float rp = 0, gp = 0, bp = 0;
 
-    // Side
-    { x_offset,         0.0f,   z_offset },
-    { x_offset,         0.0f,   z_offset + width },
-    { x_offset,         height, z_offset + width },
-    { x_offset,         0.0f,   z_offset },
-    { x_offset,         height, z_offset + width },
-    { x_offset,         height, z_offset },
+  if (h >= 0 && h < 60) { rp = c; gp = x; bp = 0; }
+  else if (h >= 60 && h < 120) { rp = x; gp = c; bp = 0; }
+  else if (h >= 120 && h < 180) { rp = 0; gp = c; bp = x; }
+  else if (h >= 180 && h < 240) { rp = 0; gp = x; bp = c; }
+  else if (h >= 240 && h < 300) { rp = x; gp = 0; bp = c; }
+  else if (h >= 300 && h < 360) { rp = c; gp = 0; bp = x; }
 
-    { x_offset + width, height, z_offset },
-    { x_offset,         0.0f,   z_offset },
-    { x_offset,         height, z_offset },
-    { x_offset + width, height, z_offset },
-    { x_offset + width, 0.0f,   z_offset },
-    { x_offset,         0.0f,   z_offset },
-
-    { x_offset,         height, z_offset + width },
-    { x_offset,         0.0f,   z_offset + width },
-    { x_offset + width, 0.0f,   z_offset + width },
-    { x_offset + width, height, z_offset + width },
-    { x_offset,         height, z_offset + width },
-    { x_offset + width, 0.0f,   z_offset + width },
-
-    { x_offset + width, height, z_offset + width },
-    { x_offset + width, 0.0f,   z_offset },
-    { x_offset + width, height, z_offset },
-    { x_offset + width, 0.0f,   z_offset },
-    { x_offset + width, height, z_offset + width },
-    { x_offset + width, 0.0f,   z_offset + width },
-
-    // Top
-    { x_offset + width, height, z_offset + width },
-    { x_offset + width, height, z_offset },
-    { x_offset,         height, z_offset },
-    { x_offset + width, height, z_offset + width },
-    { x_offset,         height, z_offset },
-    { x_offset,         height, z_offset + width },
-
-    { x_offset,         height, z_offset + width },
-    { x_offset + width, height, z_offset },
-    { x_offset,         height, z_offset },
-    { x_offset + width, height, z_offset },
-    { x_offset + width, height, z_offset + width },
-    { x_offset,         height, z_offset + width }
-  };
-
-  float sideMlpy1, sideMlpy2, sideMlpy3, sideMlpy4;
-  if (m_mode == GL_TRIANGLES)
-  {
-    sideMlpy1 = 0.5f;
-    sideMlpy2 = 0.25f;
-    sideMlpy3 = 0.75f;
-    sideMlpy4 = 0.5f;
-  }
-  else
-  {
-    sideMlpy1 = sideMlpy2 = sideMlpy3 = sideMlpy4 = 1.0f;
-  }
-
-  // One color for each vertex. They were generated randomly.
-  m_color_buffer_data =
-  {
-    // Bottom
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-
-    // Side
-    { red * sideMlpy1, green * sideMlpy1, blue * sideMlpy1 },
-    { red * sideMlpy1, green * sideMlpy1, blue * sideMlpy1 },
-    { red * sideMlpy1, green * sideMlpy1, blue * sideMlpy1 },
-    { red * sideMlpy1, green * sideMlpy1, blue * sideMlpy1 },
-    { red * sideMlpy1, green * sideMlpy1, blue * sideMlpy1 },
-    { red * sideMlpy1, green * sideMlpy1, blue * sideMlpy1 },
-
-    { red * sideMlpy2, green * sideMlpy2, blue * sideMlpy2 },
-    { red * sideMlpy2, green * sideMlpy2, blue * sideMlpy2 },
-    { red * sideMlpy2, green * sideMlpy2, blue * sideMlpy2 },
-    { red * sideMlpy2, green * sideMlpy2, blue * sideMlpy2 },
-    { red * sideMlpy2, green * sideMlpy2, blue * sideMlpy2 },
-    { red * sideMlpy2, green * sideMlpy2, blue * sideMlpy2 },
-
-    { red * sideMlpy3, green * sideMlpy3, blue * sideMlpy3 },
-    { red * sideMlpy3, green * sideMlpy3, blue * sideMlpy3 },
-    { red * sideMlpy3, green * sideMlpy3, blue * sideMlpy3 },
-    { red * sideMlpy3, green * sideMlpy3, blue * sideMlpy3 },
-    { red * sideMlpy3, green * sideMlpy3, blue * sideMlpy3 },
-    { red * sideMlpy3, green * sideMlpy3, blue * sideMlpy3 },
-
-    { red * sideMlpy4, green * sideMlpy4, blue * sideMlpy4 },
-    { red * sideMlpy4, green * sideMlpy4, blue * sideMlpy4 },
-    { red * sideMlpy4, green * sideMlpy4, blue * sideMlpy4 },
-    { red * sideMlpy4, green * sideMlpy4, blue * sideMlpy4 },
-    { red * sideMlpy4, green * sideMlpy4, blue * sideMlpy4 },
-    { red * sideMlpy4, green * sideMlpy4, blue * sideMlpy4 },
-
-    // Top
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-    { red, green, blue },
-  };
-
-#ifdef HAS_GL
-  glBindBuffer(GL_ARRAY_BUFFER, m_vertexVBO[0]);
-  glBufferData(GL_ARRAY_BUFFER, m_vertex_buffer_data.size()*sizeof(glm::vec3), &m_vertex_buffer_data[0], GL_STATIC_DRAW);
-  glBindBuffer(GL_ARRAY_BUFFER, m_vertexVBO[1]);
-  glBufferData(GL_ARRAY_BUFFER, m_color_buffer_data.size()*sizeof(glm::vec3), &m_color_buffer_data[0], GL_STATIC_DRAW);
-#endif
-  glDrawArrays(m_mode, 0, m_vertex_buffer_data.size()); /* 12*3 indices starting at 0 -> 12 triangles + 4*3 to have on lines show correct */
+  r = rp + m;
+  g = gp + m;
+  b = bp + m;
 }
 
-void CVisualizationSpectrum::draw_bars(void)
+void CVisualizationSpectrum::get_rainbow_color(float position, float& r, float& g, float& b)
 {
-  int x, y;
-  GLfloat x_offset, z_offset, r_base, b_base;
+  float hue = position * 360.0f;
+  hsl_to_rgb(hue, 1.0f, 0.5f, r, g, b);
+}
 
-  for(y = 0; y < 16; y++)
+void CVisualizationSpectrum::draw_spectrum_bars(void)
+{
+  const int numBars = NUM_BANDS;
+  const float barWidth = 1.8f / numBars;
+  const float barSpacing = 0.005f;
+  const float actualBarWidth = barWidth - barSpacing;
+  const int segmentsPerBar = 32;
+  const float segmentHeight = 2.0f / segmentsPerBar;
+  const float startX = -0.9f;
+  const float startY = -0.95f;
+
+  m_vertex_buffer_data.clear();
+  m_color_buffer_data.clear();
+
+  for (int bar = 0; bar < numBars; bar++)
   {
-    z_offset = -1.6 + ((15 - y) * 0.2);
+    float height = m_cHeights[bar];
+    if (height < 0.001f)
+      height = 0.001f;
 
-    b_base = y * (1.0 / 15);
-    r_base = 1.0 - b_base;
+    float maxVisualHeight = 1.9f;
+    float visualHeight = height * maxVisualHeight;
+    if (visualHeight > maxVisualHeight)
+      visualHeight = maxVisualHeight;
 
-    for(x = 0; x < 16; x++)
+    int numSegments = (int)(visualHeight / segmentHeight);
+    if (numSegments < 1) numSegments = 1;
+    if (numSegments > segmentsPerBar) numSegments = segmentsPerBar;
+
+    float barX = startX + bar * barWidth;
+
+    float baseR, baseG, baseB;
+    get_rainbow_color((float)bar / (float)(numBars - 1), baseR, baseG, baseB);
+
+    for (int seg = 0; seg < numSegments; seg++)
     {
-      x_offset = -1.6 + ((float)x * 0.2);
-      if (::fabs(m_cHeights[y][x]-m_heights[y][x])>m_hSpeed)
+      float segY = startY + seg * segmentHeight;
+      float segH = segmentHeight;
+      if (seg == numSegments - 1)
       {
-        if (m_cHeights[y][x]<m_heights[y][x])
-          m_cHeights[y][x] += m_hSpeed;
-        else
-          m_cHeights[y][x] -= m_hSpeed;
+        float totalH = numSegments * segmentHeight;
+        if (totalH < visualHeight)
+          segH = visualHeight - (numSegments - 1) * segmentHeight;
       }
-      draw_bar(x_offset, z_offset, m_cHeights[y][x], r_base - (float(x) * (r_base / 15.0)), (float)x * (1.0 / 15), b_base);
+
+      float intensityFactor = 0.3f + 0.7f * ((float)seg / (float)segmentsPerBar);
+      float r = baseR * intensityFactor;
+      float g = baseG * intensityFactor;
+      float b = baseB * intensityFactor;
+
+      float x0 = barX;
+      float y0 = segY;
+      float x1 = barX + actualBarWidth;
+      float y1 = segY + segH;
+
+      m_vertex_buffer_data.push_back({x0, y0, 0.0f});
+      m_vertex_buffer_data.push_back({x1, y0, 0.0f});
+      m_vertex_buffer_data.push_back({x1, y1, 0.0f});
+
+      m_vertex_buffer_data.push_back({x0, y0, 0.0f});
+      m_vertex_buffer_data.push_back({x1, y1, 0.0f});
+      m_vertex_buffer_data.push_back({x0, y1, 0.0f});
+
+      for (int v = 0; v < 6; v++)
+      {
+        m_color_buffer_data.push_back({r, g, b});
+      }
     }
+  }
+
+  if (!m_vertex_buffer_data.empty())
+  {
+#ifdef HAS_GL
+    glBindBuffer(GL_ARRAY_BUFFER, m_vertexVBO[0]);
+    glBufferData(GL_ARRAY_BUFFER, m_vertex_buffer_data.size()*sizeof(glm::vec3), &m_vertex_buffer_data[0], GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, m_vertexVBO[1]);
+    glBufferData(GL_ARRAY_BUFFER, m_color_buffer_data.size()*sizeof(glm::vec3), &m_color_buffer_data[0], GL_STATIC_DRAW);
+#endif
+    glDrawArrays(GL_TRIANGLES, 0, m_vertex_buffer_data.size());
   }
 }
 
 void CVisualizationSpectrum::AudioData(const float* pAudioData, size_t iAudioDataLength)
 {
-  int i,c;
-  int y=0;
-  GLfloat val;
+  int xscale[] = {0, 1, 2, 3, 5, 7, 10, 14, 20, 28, 40, 54, 74, 101, 137, 187, 255,
+                  256, 270, 290, 310, 340, 370, 400, 430, 460, 490, 520, 558, 598, 642,
+                  689, 739, 792, 848, 907, 970, 1037, 1108, 1183, 1263, 1348, 1438, 1534,
+                  1636, 1744, 1859, 1983, 2116, 2259, 2413, 2579, 2758, 2952, 3161, 3388,
+                  3635, 3904, 4197, 4517, 4866, 5247, 5664, 6121, 6622, 7173, 7778, 8444};
 
-  int xscale[] = {0, 1, 2, 3, 5, 7, 10, 14, 20, 28, 40, 54, 74, 101, 137, 187, 255};
-
-  for(y = 15; y > 0; y--)
+  for(int y = NUM_BANDS - 1; y > 0; y--)
   {
-    for(i = 0; i < 16; i++)
-    {
-      m_heights[y][i] = m_heights[y - 1][i];
-    }
+    m_heights[y] = m_heights[y - 1];
   }
 
-  for(i = 0; i < NUM_BANDS; i++)
+  for(int i = 0; i < NUM_BANDS; i++)
   {
-    for(c = xscale[i], y = 0; c < xscale[i + 1]; c++)
+    int y = 0;
+    int startIdx = (i < 17) ? xscale[i] : xscale[16] + (i - 17) * ((xscale[63] - xscale[16]) / 47);
+    int endIdx = (i < 17) ? xscale[i + 1] : xscale[16] + (i - 16) * ((xscale[63] - xscale[16]) / 47);
+
+    for(int c = startIdx; c < endIdx && c < (int)iAudioDataLength; c++)
     {
-      if (c<iAudioDataLength)
-      {
-        if((int)(pAudioData[c] * (INT16_MAX)) > y)
-          y = (int)(pAudioData[c] * (INT16_MAX));
-      }
-      else
-        continue;
+      int val = (int)(pAudioData[c] * (INT16_MAX));
+      if(val > y)
+        y = val;
     }
+
     y >>= 7;
+    float val;
     if(y > 0)
       val = (logf(y) * m_scale);
     else
       val = 0;
-    m_heights[0][i] = val;
+
+    m_heights[i] = val;
+  }
+
+  for(int i = 0; i < NUM_BANDS; i++)
+  {
+    if (::fabs(m_cHeights[i] - m_heights[i]) > m_hSpeed)
+    {
+      if (m_cHeights[i] < m_heights[i])
+        m_cHeights[i] += m_hSpeed;
+      else
+        m_cHeights[i] -= m_hSpeed;
+    }
+    else
+    {
+      m_cHeights[i] = m_heights[i];
+    }
   }
 }
 
@@ -487,23 +357,23 @@ void CVisualizationSpectrum::SetBarHeightSetting(int settingValue)
 {
   switch (settingValue)
   {
-  case 1://standard
+  case 1:
     m_scale = 1.f / log(256.f);
     break;
 
-  case 2://big
+  case 2:
     m_scale = 2.f / log(256.f);
     break;
 
-  case 3://real big
+  case 3:
     m_scale = 3.f / log(256.f);
     break;
 
-  case 4://unused
+  case 4:
     m_scale = 0.33f / log(256.f);
     break;
 
-  case 0://small
+  case 0:
   default:
     m_scale = 0.5f / log(256.f);
     break;
@@ -537,32 +407,6 @@ void CVisualizationSpectrum::SetSpeedSetting(int settingValue)
   }
 }
 
-void CVisualizationSpectrum::SetModeSetting(int settingValue)
-{
-  switch (settingValue)
-  {
-    case 1:
-      m_mode = GL_LINES;
-      m_pointSize = 0.0f;
-      break;
-
-    case 2:
-      m_mode = GL_POINTS;
-      m_pointSize = kodi::addon::GetSettingInt("pointsize");
-      break;
-
-    case 0:
-    default:
-      m_mode = GL_TRIANGLES;
-      m_pointSize = 0.0f;
-      break;
-  }
-}
-
-//-- SetSetting ---------------------------------------------------------------
-// Set a specific Setting value (called from Kodi)
-// !!! Add-on master function !!!
-//-----------------------------------------------------------------------------
 ADDON_STATUS CVisualizationSpectrum::SetSetting(const std::string& settingName, const kodi::addon::CSettingValue& settingValue)
 {
   if (settingName.empty() || settingValue.empty())
@@ -576,16 +420,6 @@ ADDON_STATUS CVisualizationSpectrum::SetSetting(const std::string& settingName, 
   else if (settingName == "speed")
   {
     SetSpeedSetting(settingValue.GetInt());
-    return ADDON_STATUS_OK;
-  }
-  else if (settingName == "mode")
-  {
-    SetModeSetting(settingValue.GetInt());
-    return ADDON_STATUS_OK;
-  }
-  else if (settingName == "rotation_angle")
-  {
-    m_y_fixedAngle = settingValue.GetInt();
     return ADDON_STATUS_OK;
   }
 
