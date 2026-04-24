@@ -50,8 +50,14 @@ private:
 
   GLfloat m_heights[NUM_BANDS];
   GLfloat m_cHeights[NUM_BANDS];
+  GLfloat m_peakHeights[NUM_BANDS];
+  int m_peakHoldCounters[NUM_BANDS];
   GLfloat m_scale;
   float m_hSpeed;
+  float m_fallSpeed;
+  float m_peakFallSpeed;
+  int m_peakHoldFrames;
+  bool m_firstAudioFrame;
 
   void hsl_to_rgb(float h, float s, float l, float& r, float& g, float& b);
   void get_rainbow_color(float position, float& r, float& g, float& b);
@@ -76,7 +82,11 @@ private:
 };
 
 CVisualizationSpectrum::CVisualizationSpectrum()
-  : m_hSpeed(0.05f)
+  : m_hSpeed(0.08f),
+    m_fallSpeed(0.025f),
+    m_peakFallSpeed(0.015f),
+    m_peakHoldFrames(8),
+    m_firstAudioFrame(true)
 {
   m_scale = 1.0 / log(256.0);
 
@@ -85,6 +95,8 @@ CVisualizationSpectrum::CVisualizationSpectrum()
 
   memset(m_heights, 0, sizeof(m_heights));
   memset(m_cHeights, 0, sizeof(m_cHeights));
+  memset(m_peakHeights, 0, sizeof(m_peakHeights));
+  memset(m_peakHoldCounters, 0, sizeof(m_peakHoldCounters));
 }
 
 bool CVisualizationSpectrum::Start(int channels, int samplesPerSec, int bitsPerSample, const std::string& songName)
@@ -106,7 +118,11 @@ bool CVisualizationSpectrum::Start(int channels, int samplesPerSec, int bitsPerS
   {
     m_heights[i] = 0.0f;
     m_cHeights[i] = 0.0f;
+    m_peakHeights[i] = 0.0f;
+    m_peakHoldCounters[i] = 0;
   }
+
+  m_firstAudioFrame = true;
 
   m_projMat = glm::ortho(-1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f);
 
@@ -223,9 +239,9 @@ void CVisualizationSpectrum::draw_spectrum_bars(void)
 {
   const int numBars = NUM_BANDS;
   const float barWidth = 1.8f / numBars;
-  const float barSpacing = 0.005f;
+  const float barSpacing = 0.004f;
   const float actualBarWidth = barWidth - barSpacing;
-  const int segmentsPerBar = 32;
+  const int segmentsPerBar = 36;
   const float segmentHeight = 2.0f / segmentsPerBar;
   const float startX = -0.9f;
   const float startY = -0.95f;
@@ -233,11 +249,25 @@ void CVisualizationSpectrum::draw_spectrum_bars(void)
   m_vertex_buffer_data.clear();
   m_color_buffer_data.clear();
 
+  auto add_rect = [this](float x0, float y0, float x1, float y1, float r, float g, float b)
+  {
+    m_vertex_buffer_data.push_back({x0, y0, 0.0f});
+    m_vertex_buffer_data.push_back({x1, y0, 0.0f});
+    m_vertex_buffer_data.push_back({x1, y1, 0.0f});
+
+    m_vertex_buffer_data.push_back({x0, y0, 0.0f});
+    m_vertex_buffer_data.push_back({x1, y1, 0.0f});
+    m_vertex_buffer_data.push_back({x0, y1, 0.0f});
+
+    for (int v = 0; v < 6; v++)
+      m_color_buffer_data.push_back({r, g, b});
+  };
+
   for (int bar = 0; bar < numBars; bar++)
   {
     float height = m_cHeights[bar];
-    if (height < 0.001f)
-      height = 0.001f;
+    if (height <= 0.001f)
+      height = 0.0f;
 
     float maxVisualHeight = 1.9f;
     float visualHeight = height * maxVisualHeight;
@@ -245,7 +275,6 @@ void CVisualizationSpectrum::draw_spectrum_bars(void)
       visualHeight = maxVisualHeight;
 
     int numSegments = (int)(visualHeight / segmentHeight);
-    if (numSegments < 1) numSegments = 1;
     if (numSegments > segmentsPerBar) numSegments = segmentsPerBar;
 
     float barX = startX + bar * barWidth;
@@ -264,28 +293,51 @@ void CVisualizationSpectrum::draw_spectrum_bars(void)
           segH = visualHeight - (numSegments - 1) * segmentHeight;
       }
 
-      float intensityFactor = 0.3f + 0.7f * ((float)seg / (float)segmentsPerBar);
+      float normalizedSeg = (float)(seg + 1) / (float)segmentsPerBar;
+      float intensityFactor = 0.18f + 0.82f * normalizedSeg;
+      if (seg == numSegments - 1)
+        intensityFactor = 1.15f;
+
       float r = baseR * intensityFactor;
       float g = baseG * intensityFactor;
       float b = baseB * intensityFactor;
+      if (r > 1.0f) r = 1.0f;
+      if (g > 1.0f) g = 1.0f;
+      if (b > 1.0f) b = 1.0f;
 
       float x0 = barX;
       float y0 = segY;
       float x1 = barX + actualBarWidth;
       float y1 = segY + segH;
 
-      m_vertex_buffer_data.push_back({x0, y0, 0.0f});
-      m_vertex_buffer_data.push_back({x1, y0, 0.0f});
-      m_vertex_buffer_data.push_back({x1, y1, 0.0f});
+      add_rect(x0, y0, x1, y1, r, g, b);
+    }
 
-      m_vertex_buffer_data.push_back({x0, y0, 0.0f});
-      m_vertex_buffer_data.push_back({x1, y1, 0.0f});
-      m_vertex_buffer_data.push_back({x0, y1, 0.0f});
+    float peakHeight = m_peakHeights[bar];
+    if (peakHeight > 0.001f)
+    {
+      float peakVisualHeight = peakHeight * maxVisualHeight;
+      if (peakVisualHeight > maxVisualHeight)
+        peakVisualHeight = maxVisualHeight;
 
-      for (int v = 0; v < 6; v++)
+      float peakY0 = startY + peakVisualHeight - segmentHeight * 0.65f;
+      float peakY1 = peakY0 + segmentHeight * 0.45f;
+      if (peakY0 < startY)
       {
-        m_color_buffer_data.push_back({r, g, b});
+        peakY0 = startY;
+        peakY1 = peakY0 + segmentHeight * 0.45f;
       }
+      if (peakY1 > startY + maxVisualHeight)
+        peakY1 = startY + maxVisualHeight;
+
+      float peakR = baseR * 1.25f + 0.2f;
+      float peakG = baseG * 1.25f + 0.2f;
+      float peakB = baseB * 1.25f + 0.2f;
+      if (peakR > 1.0f) peakR = 1.0f;
+      if (peakG > 1.0f) peakG = 1.0f;
+      if (peakB > 1.0f) peakB = 1.0f;
+
+      add_rect(barX, peakY0, barX + actualBarWidth, peakY1, peakR, peakG, peakB);
     }
   }
 
@@ -309,11 +361,6 @@ void CVisualizationSpectrum::AudioData(const float* pAudioData, size_t iAudioDat
                   1636, 1744, 1859, 1983, 2116, 2259, 2413, 2579, 2758, 2952, 3161, 3388,
                   3635, 3904, 4197, 4517, 4866, 5247, 5664, 6121, 6622, 7173, 7778, 8444};
 
-  for(int y = NUM_BANDS - 1; y > 0; y--)
-  {
-    m_heights[y] = m_heights[y - 1];
-  }
-
   for(int i = 0; i < NUM_BANDS; i++)
   {
     int y = 0;
@@ -322,7 +369,7 @@ void CVisualizationSpectrum::AudioData(const float* pAudioData, size_t iAudioDat
 
     for(int c = startIdx; c < endIdx && c < (int)iAudioDataLength; c++)
     {
-      int val = (int)(pAudioData[c] * (INT16_MAX));
+      int val = (int)(::fabs(pAudioData[c]) * (INT16_MAX));
       if(val > y)
         y = val;
     }
@@ -339,18 +386,54 @@ void CVisualizationSpectrum::AudioData(const float* pAudioData, size_t iAudioDat
 
   for(int i = 0; i < NUM_BANDS; i++)
   {
-    if (::fabs(m_cHeights[i] - m_heights[i]) > m_hSpeed)
+    if (m_firstAudioFrame)
     {
-      if (m_cHeights[i] < m_heights[i])
-        m_cHeights[i] += m_hSpeed;
+      m_cHeights[i] = m_heights[i];
+      m_peakHeights[i] = m_heights[i];
+      m_peakHoldCounters[i] = m_peakHoldFrames;
+      continue;
+    }
+
+    if (m_cHeights[i] < m_heights[i])
+    {
+      float riseStep = m_hSpeed;
+      if (::fabs(m_cHeights[i] - m_heights[i]) > riseStep)
+        m_cHeights[i] += riseStep;
       else
-        m_cHeights[i] -= m_hSpeed;
+        m_cHeights[i] = m_heights[i];
+    }
+    else if (::fabs(m_cHeights[i] - m_heights[i]) > m_fallSpeed)
+    {
+      m_cHeights[i] -= m_fallSpeed;
     }
     else
     {
       m_cHeights[i] = m_heights[i];
     }
+
+    if (m_heights[i] >= m_peakHeights[i])
+    {
+      m_peakHeights[i] = m_heights[i];
+      m_peakHoldCounters[i] = m_peakHoldFrames;
+    }
+    else if (m_peakHoldCounters[i] > 0)
+    {
+      m_peakHoldCounters[i]--;
+    }
+    else if (m_peakHeights[i] > m_peakFallSpeed)
+    {
+      m_peakHeights[i] -= m_peakFallSpeed;
+    }
+    else
+    {
+      m_peakHeights[i] = 0.0f;
+    }
+
+    if (m_peakHeights[i] < m_cHeights[i])
+      m_peakHeights[i] = m_cHeights[i];
   }
+
+  m_firstAudioFrame = false;
 }
 
 void CVisualizationSpectrum::SetBarHeightSetting(int settingValue)
@@ -385,24 +468,39 @@ void CVisualizationSpectrum::SetSpeedSetting(int settingValue)
   switch (settingValue)
   {
   case 1:
-    m_hSpeed = 0.025f;
+    m_hSpeed = 0.05f;
+    m_fallSpeed = 0.015f;
+    m_peakFallSpeed = 0.01f;
+    m_peakHoldFrames = 10;
     break;
 
   case 2:
-    m_hSpeed = 0.0125f;
+    m_hSpeed = 0.035f;
+    m_fallSpeed = 0.01f;
+    m_peakFallSpeed = 0.0075f;
+    m_peakHoldFrames = 12;
     break;
 
   case 3:
-    m_hSpeed = 0.1f;
+    m_hSpeed = 0.12f;
+    m_fallSpeed = 0.035f;
+    m_peakFallSpeed = 0.02f;
+    m_peakHoldFrames = 8;
     break;
 
   case 4:
     m_hSpeed = 0.2f;
+    m_fallSpeed = 0.06f;
+    m_peakFallSpeed = 0.035f;
+    m_peakHoldFrames = 6;
     break;
 
   case 0:
   default:
-    m_hSpeed = 0.05f;
+    m_hSpeed = 0.08f;
+    m_fallSpeed = 0.025f;
+    m_peakFallSpeed = 0.015f;
+    m_peakHoldFrames = 8;
     break;
   }
 }
