@@ -238,7 +238,7 @@ void CVisualizationSpectrum::get_rainbow_color(float position, float& r, float& 
 void CVisualizationSpectrum::draw_spectrum_bars(void)
 {
   const int numBars = NUM_BANDS;
-  const float barWidth = 1.8f / numBars;
+  const float barWidth = 2.1f / numBars;
   const float barSpacing = 0.004f;
   const float actualBarWidth = barWidth - barSpacing;
   const int segmentsPerBar = 36;
@@ -293,10 +293,9 @@ void CVisualizationSpectrum::draw_spectrum_bars(void)
           segH = visualHeight - (numSegments - 1) * segmentHeight;
       }
 
-      float normalizedSeg = (float)(seg + 1) / (float)segmentsPerBar;
-      float intensityFactor = 0.18f + 0.82f * normalizedSeg;
-      if (seg == numSegments - 1)
-        intensityFactor = 1.15f;
+      float t = (float)(seg + 1) / (float)segmentsPerBar;
+      float intensityFactor = 0.5f - 0.5f * cosf(t * M_PI);
+      intensityFactor = 0.15f + 0.85f * intensityFactor;
 
       float r = baseR * intensityFactor;
       float g = baseG * intensityFactor;
